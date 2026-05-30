@@ -3,14 +3,15 @@ import re
 import logging
 import xml.etree.ElementTree as ET
 import pandas as pd
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import CommandStart
-from Levenshtein import distance
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.types import FSInputFile
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Инициализация бота (токен заберем из переменных окружения Railway)
+# Инициализация бота
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("Переменная окружения BOT_TOKEN не задана!")
@@ -18,165 +19,191 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Путь к YML-файлу (положи его в корень проекта или загрузи на сервер)
-YML_FILE_PATH = "price.yml"
+# Глобальный словарь для хранения прайса в оперативной памяти
+# Структура: { "название_товара_в_нижнем_регистре": { 'id': ..., 'price': ..., 'vendorCode': ... } }
+price_dict = {}
 
-# Глобальный словарь для кэширования прайса в памяти
-products_db = {}
+def clean_product_name(text):
+    """
+    Очищает строку от количества в конце (например, ' 5', ' 3 шт', '- 2шт', ' 10шт.').
+    При этом полностью сохраняет все украинские буквы, спецсимволы и знаки препинания внутри названия.
+    """
+    text = re.sub(r'\s*[-\u2013\u2014]*\s*\d+\s*(?:шт|шт\.|pcs)?\s*$', '', text, flags=re.IGNORECASE)
+    return text.strip()
 
-def load_yml_to_memory():
-    """Парсит YML файл и собирает базу товаров в оперативку"""
-    global products_db
-    if not os.path.exists(YML_FILE_PATH):
-        logging.warning(f"Файл {YML_FILE_PATH} не найден. Сначала загрузите его!")
-        return False
-    
+def extract_quantity(text):
+    """
+    Извлекает числовое значение количества из конца строки. Если не найдено, возвращает 1.
+    """
+    match = re.search(r'(\d+)\s*(?:шт|шт\.|pcs)?\s*$', text, flags=re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    return 1
+
+def load_price_list(file_path):
+    """
+    Парсит YML файл и загружает товары в глобальный словарь price_dict.
+    """
+    global price_dict
     try:
-        tree = ET.parse(YML_FILE_PATH)
+        tree = ET.parse(file_path)
         root = tree.getroot()
         
-        new_db = {}
-        # Ищем все теги <offer> в YML
-        for offer in root.findall(".//offer"):
-            offer_id = offer.get("id", "")
-            sku = offer.find("vendorCode").text if offer.find("vendorCode") is not None else ""
-            name = offer.find("name").text if offer.find("name") is not None else ""
-            price = float(offer.find("price").text) if offer.find("price") is not None else 0.0
-            
-            if name:
-                # Ключ делаем в нижнем регистре для удобства базового поиска
-                new_db[name.lower().strip()] = {
-                    "id": offer_id,
-                    "sku": sku,
-                    "name": name,
-                    "price": price
+        new_price_dict = {}
+        offers = root.findall(".//offer")
+        
+        for offer in offers:
+            name_elem = offer.find("name")
+            if name_elem is not None and name_elem.text:
+                # Приводим к нижнему регистру для неуязвимости к регистру букв
+                name_cleaned = name_elem.text.strip().lower()
+                
+                # ИСПРАВЛЕНО: Парсим цену как float, так как в YML она с точкой (например, 194.00)
+                price_elem = offer.find("price")
+                try:
+                    price_val = float(price_elem.text) if price_elem is not None else 0.0
+                except (ValueError, TypeError):
+                    price_val = 0.0
+                
+                vendor_code_elem = offer.find("vendorCode")
+                vendor_code = vendor_code_elem.text.strip() if vendor_code_elem is not None and vendor_code_elem.text else ""
+                
+                new_price_dict[name_cleaned] = {
+                    "id": offer.get("id", ""),
+                    "price": price_val,
+                    "vendorCode": vendor_code,
+                    "original_name": name_elem.text.strip()
                 }
         
-        products_db = new_db
-        logging.info(f"Успешно загружено товаров из YML: {len(products_db)}")
-        return True
+        price_dict = new_price_dict
+        logger.info(f"Успешно загружено {len(price_dict)} товаров из прайса.")
+        return len(price_dict)
     except Exception as e:
-        logging.error(f"Ошибка при парсинге YML: {e}")
-        return False
+        logger.error(f"Ошибка при парсинге YML: {e}")
+        return None
 
-def find_best_match(user_text_name):
-    """Ищет товар по названию. Если точного совпадения нет, ищет ближайшее по расстоянию Левенштейна"""
-    search_name = user_text_name.lower().strip()
-    
-    # 1. Прямое совпадение
-    if search_name in products_db:
-        return products_db[search_name]
-    
-    # 2. Нечеткий поиск (если опечатались)
-    best_score = 999
-    best_match = None
-    
-    for db_name, data in products_db.items():
-        # Считаем разницу между строками
-        dist = distance(search_name, db_name)
-        # Если разница небольшая (например, до 3-4 символов в зависимости от длины)
-        if dist < best_score and dist <= 4:
-            best_score = dist
-            best_match = data
-            
-    return best_match
-
-@dp.message(CommandStart())
+@dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
         "👋 Привет! Я бот проекта **Elequs**.\n\n"
-        "1. Отправь мне файл `price.yml`, чтобы обновить прайс-лист товаров.\n"
-        "2. Пришли мне текстовый список заказа от дизайнера, и я сделаю из него инвойс Excel для 1С."
+        "1. Сначала пришли мне файл `price.yml` (или с любым именем `.yml`), чтобы обновить базу фурнитуры.\n"
+        "2. Затем отправь мне текстовый список заказа от дизайнера, и я сгенерирую Excel-инвойс для 1С."
     )
 
-@dp.message(F.document & F.document.file_name.endswith('.yml'))
-async def handle_yml_upload(message: types.Message):
-    """Принимает новый YML файл и обновляет базу данных в памяти"""
-    await message.answer("📥 Скачиваю и обновляю прайс-лист...")
+@dp.message(F.document & (F.document.file_name.endswith('.yml') | F.document.file_name.endswith('.xml')))
+async def handle_price_file(message: types.Message):
+    msg = await message.answer("📥 Скачиваю и обновляю прайс-лист...")
     
     file_id = message.document.file_id
     file = await bot.get_file(file_id)
+    file_path = file.file_path
     
-    # Сохраняем файл локально
-    await bot.download_file(file.file_path, YML_FILE_PATH)
+    local_path = "price_list.yml"
+    await bot.download_file(file_path, local_path)
     
-    if load_yml_to_memory():
-        await message.answer(f"✅ Прайс успешно обновлен! Всего товаров в базе: {len(products_db)}")
+    total_count = load_price_list(local_path)
+    
+    if total_count is not None:
+        await msg.edit_text(f"✅ Прайс успешно обновлен! Всего товаров в базе: {total_count}")
     else:
-        await message.answer("❌ Ошибка при обработке YML. Проверьте формат файла.")
+        await msg.edit_text("❌ Произошла ошибка при разборе YML-файла. Проверьте его структуру.")
 
-@dp.message(F.text)
-async def process_order_text(message: types.Message):
-    """Обрабатывает текстовый список от дизайнера"""
-    if not products_db:
-        # Пробуем загрузить, если файл уже лежит на сервере
-        if not load_yml_to_memory():
-            await message.answer("⚠️ База товаров пуста. Сначала загрузите `price.yml` файл.")
-            return
-
-    lines = message.text.split("\n")
-    matched_items = []
-    not_found_items = []
-
-    await message.answer("🔄 Парсим список и сверяем с прайсом...")
-
+@dp.message(F.text & ~F.text.startswith('/'))
+async def handle_order_list(message: types.Message):
+    if not price_dict:
+        await message.answer("⚠️ База товаров пуста. Сначала загрузите `price.yml` файл.")
+        return
+    
+    status_msg = await message.answer("🔄 Парсим список и сверяем с прайсом...")
+    
+    lines = message.text.strip().split('\n')
+    
+    rows = []
+    not_found = []
+    
     for line in lines:
-        if not line.strip():
+        line = line.strip()
+        if not line:
             continue
+        
+        # Вытаскиваем количество и чистое название
+        quantity = extract_quantity(line)
+        cleaned_name = clean_product_name(line)
+        cleaned_name_lower = cleaned_name.lower()
+        
+        # Поиск в базе (сначала точное совпадение)
+        if cleaned_name_lower in price_dict:
+            item = price_dict[cleaned_name_lower]
+            price = item["price"]
+            total_sum = price * quantity
             
-        # Регулярка пытается отделить название от количества (поддерживает форматы: "Товар - 5", "Товар 5 шт", "Товар-5")
-        match = re.search(r"(.+?)(?:[\s\-\s]*[\s\-]\s*|\s+)(\d+)\s*(?:шт|шт\.)?$", line.strip(), re.IGNORECASE)
-        
-        if match:
-            raw_name = match.group(1).strip()
-            quantity = int(match.group(2))
-        else:
-            # Если количество в конце строки не найдено, считаем, что количество = 1
-            raw_name = line.strip()
-            quantity = 1
-
-        # Ищем товар в нашей YML-базе
-        product_data = find_best_match(raw_name)
-        
-        if product_data:
-            matched_items.append({
-                "ID товара": product_data["id"],
-                "Артикул (SKU)": product_data["sku"],
-                "Название": product_data["name"],
-                "Цена": product_data["price"],
+            rows.append({
+                "ID товара": item["id"],
+                "Артикул (SKU)": item["vendorCode"],
+                "Название": item["original_name"],
+                "Цена": price,
                 "Количество": quantity,
-                "Сумма": product_data["price"] * quantity
+                "Сумма": total_sum
             })
         else:
-            not_found_items.append(line)
-
-    if not matched_items:
-        await message.answer("❌ Ни один товар из списка не был найден в прайсе. Проверьте названия.")
+            # Если точное совпадение не найдено, пробуем нечеткий поиск (упрощенный вариант)
+            found_match = False
+            for match_name_lower, item in price_dict.items():
+                # Простая проверка на вхождение подстроки для надежности
+                if cleaned_name_lower in match_name_lower or match_name_lower in cleaned_name_lower:
+                    price = item["price"]
+                    total_sum = price * quantity
+                    rows.append({
+                        "ID товара": item["id"],
+                        "Артикул (SKU)": item["vendorCode"],
+                        "Название": item["original_name"],
+                        "Цена": price,
+                        "Количество": quantity,
+                        "Сумма": total_sum
+                    })
+                    found_match = True
+                    break
+            
+            if not found_match:
+                not_found.append(line)
+    
+    if not rows:
+        await status_msg.edit_text("❌ Ни один товар из списка не был найден в прайсе. Проверьте названия.")
         return
 
-    # Создаем Excel-файл через Pandas
-    df = pd.DataFrame(matched_items)
-    excel_path = f"invoice_{message.from_user.id}.xlsx"
+    # Создаем DataFrame
+    df = pd.DataFrame(rows)
+    output_filename = f"Invoice_{message.from_user.id}.xlsx"
     
-    # Сохраняем в красивый xlsx формат
-    df.to_excel(excel_path, index=False)
-
-    # Отправляем инвойс пользователю
-    invoice_file = types.FSInputFile(excel_path)
-    
-    report_text = f"📊 Инвойс успешно сформирован!\n✅ Распознано позиций: {len(matched_items)}"
-    if not_found_items:
-        report_text += f"\n\n⚠️ **Не удалось найти в прайсе:**\n" + "\n".join([f"• {item}" for item in not_found_items])
+    # ИСПРАВЛЕНО: Генерируем Excel с автоподбором ширины колонок, чтобы текст не слипался
+    with pd.ExcelWriter(output_filename, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Invoice')
+        worksheet = writer.sheets['Invoice']
         
-    await message.reply_document(invoice_file, caption=report_text)
+        # Перебираем все колонки и устанавливаем ширину по самому длинному тексту в ячейке
+        for col in worksheet.columns:
+            max_len = max(len(str(cell.value or '')) for cell in col)
+            col_letter = col[0].column_letter
+            # Добавляем небольшой запас (+3 символа)
+            worksheet.column_dimensions[col_letter].width = max(max_len + 3, 12)
+
+    # Формируем отчет в сообщении
+    report_text = f"📊 **Инвойс успешно сформирован!**\n\n✅ Найдено позиций: {len(rows)}"
+    if not_found:
+        report_text += "\n\n⚠️ **Не удалось найти в прайсе:**\n" + "\n".join([f"• {item}" for item in not_found])
     
-    # Удаляем временный файл с диска
-    if os.path.exists(excel_path):
-        os.remove(excel_path)
+    # Отправляем файл пользователю
+    excel_file = FSInputFile(output_filename)
+    await message.reply_document(excel_file, caption=report_text, parse_mode="Markdown")
+    
+    # Удаляем временный файл с диска сервера
+    if os.path.exists(output_filename):
+        os.remove(output_filename)
+        
+    await status_msg.delete()
 
 async def main():
-    # Предварительная загрузка базы при старте, если файл уже залит на гитхаб
-    load_yml_to_memory()
+    # Запуск бота в режиме Polling
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
