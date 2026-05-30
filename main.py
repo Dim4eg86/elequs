@@ -53,19 +53,19 @@ def load_price_list(file_path):
         offers = root.findall(".//offer")
         
         for offer in offers:
-            name_elem = offer.find("name")
+            # Используем .// для сквозного поиска тега внутри offer
+            name_elem = offer.find(".//name")
             if name_elem is not None and name_elem.text:
-                # Приводим к нижнему регистру для неуязвимости к регистру букв
                 name_cleaned = name_elem.text.strip().lower()
                 
-                # ИСПРАВЛЕНО: Парсим цену как float, так как в YML она с точкой (например, 194.00)
-                price_elem = offer.find("price")
+                # ИСПРАВЛЕНО: Глубокий поиск цены (.//price) и конвертация
+                price_elem = offer.find(".//price")
                 try:
-                    price_val = float(price_elem.text) if price_elem is not None else 0.0
+                    price_val = float(price_elem.text) if price_elem is not None and price_elem.text else 0.0
                 except (ValueError, TypeError):
                     price_val = 0.0
                 
-                vendor_code_elem = offer.find("vendorCode")
+                vendor_code_elem = offer.find(".//vendorCode")
                 vendor_code = vendor_code_elem.text.strip() if vendor_code_elem is not None and vendor_code_elem.text else ""
                 
                 new_price_dict[name_cleaned] = {
