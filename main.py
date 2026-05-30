@@ -84,7 +84,7 @@ def find_best_match(user_text_name):
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     await message.answer(
-        "👋 Привет! Я бот проекта **Elekus**.\n\n"
+        "👋 Привет! Я бот проекта **Elequs**.\n\n"
         "1. Отправь мне файл `price.yml`, чтобы обновить прайс-лист товаров.\n"
         "2. Пришли мне текстовый список заказа от дизайнера, и я сделаю из него инвойс Excel для 1С."
     )
