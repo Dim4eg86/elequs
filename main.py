@@ -6,113 +6,7 @@ import pandas as pd
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import FSInputFile
-# 1. ДОБАВЬ ЭТОТ ИМПОРТ НАВЕРХ ФАЙЛА
 from deep_translator import GoogleTranslator
-
-# ... (остальной код, функции clean_product_name и load_price_list остаются без изменений) ...
-
-@dp.message(F.text & ~F.text.startswith('/'))
-async def handle_order_list(message: types.Message):
-    if not price_dict:
-        await message.answer("⚠️ База товаров пуста. Сначала загрузите `price.yml` файл.")
-        return
-    
-    status_msg = await message.answer("🔄 Переводим и сверяем список с прайсом...")
-    
-    lines = message.text.strip().split('\n')
-    
-    rows = []
-    not_found = []
-    
-    # Инициализируем переводчик (с любого языка на украинский)
-    translator = GoogleTranslator(source='auto', target='uk')
-    
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        
-        # Вытаскиваем количество
-        quantity = extract_quantity(line)
-        
-        # Очищаем название от цифр/шт
-        cleaned_name = clean_product_name(line)
-        
-        # ИСПРАВЛЕНО: Автоматически переводим название на украинский язык
-        try:
-            translated_name = translator.translate(cleaned_name)
-        except Exception as e:
-            logger.error(f"Ошибка перевода строки '{cleaned_name}': {e}")
-            translated_name = cleaned_name  # Если упало, пробуем искать исходный текст
-            
-        cleaned_name_lower = translated_name.lower()
-        
-        # Поиск в базе (сначала точное совпадение)
-        if cleaned_name_lower in price_dict:
-            item = price_dict[cleaned_name_lower]
-            price = item["price"]
-            total_sum = price * quantity
-            
-            rows.append({
-                "ID товара": item["id"],
-                "Артикул (SKU)": item["vendorCode"],
-                "Название": item["original_name"],
-                "Цена": price,
-                "Количество": quantity,
-                "Сумма": total_sum
-            })
-        else:
-            # Если точное совпадение не найдено, пробуем нечеткий поиск
-            found_match = False
-            for match_name_lower, item in price_dict.items():
-                if cleaned_name_lower in match_name_lower or match_name_lower in cleaned_name_lower:
-                    price = item["price"]
-                    total_sum = price * quantity
-                    rows.append({
-                        "ID товара": item["id"],
-                        "Артикул (SKU)": item["vendorCode"],
-                        "Название": item["original_name"],
-                        "Цена": price,
-                        "Количество": quantity,
-                        "Сумма": total_sum
-                    })
-                    found_match = True
-                    break
-            
-            if not found_match:
-                not_found.append(line)
-    
-    if not rows:
-        await status_msg.edit_text("❌ Ни один товар из списка не был найден в прайсе. Проверьте названия.")
-        return
-
-    # Создаем DataFrame
-    df = pd.DataFrame(rows)
-    output_filename = f"Invoice_{message.from_user.id}.xlsx"
-    
-    # Генерируем Excel с автоподбором ширины колонок
-    with pd.ExcelWriter(output_filename, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Invoice')
-        worksheet = writer.sheets['Invoice']
-        
-        for col in worksheet.columns:
-            max_len = max(len(str(cell.value or '')) for cell in col)
-            col_letter = col[0].column_letter
-            worksheet.column_dimensions[col_letter].width = max(max_len + 3, 12)
-
-    # Формируем отчет в сообщении
-    report_text = f"📊 **Инвойс успешно сформирован!**\n\n✅ Найдено позиций: {len(rows)}"
-    if not_found:
-        report_text += "\n\n⚠️ **Не удалось найти в прайсе:**\n" + "\n".join([f"• {item}" for item in not_found])
-    
-    # Отправляем файл пользователю
-    excel_file = FSInputFile(output_filename)
-    await message.reply_document(excel_file, caption=report_text, parse_mode="Markdown")
-    
-    if os.path.exists(output_filename):
-        os.remove(output_filename)
-        
-    await status_msg.delete()
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -127,7 +21,6 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # Глобальный словарь для хранения прайса в оперативной памяти
-# Структура: { "название_товара_в_нижнем_регистре": { 'id': ..., 'price': ..., 'vendorCode': ... } }
 price_dict = {}
 
 def clean_product_name(text):
@@ -194,7 +87,7 @@ async def cmd_start(message: types.Message):
     await message.answer(
         "👋 Привет! Я бот проекта **Elequs**.\n\n"
         "1. Сначала пришли мне файл `price.yml` (или с любым именем `.yml`), чтобы обновить базу фурнитуры.\n"
-        "2. Затем отправь мне текстовый список заказа от дизайнера, и я сгенерирую Excel-инвойс для 1С."
+        "2. Затем отправь мне текстовый список заказа от дизайнера (на украинском или русском языке), и я сгенерирую Excel-инвойс для 1С."
     )
 
 @dp.message(F.document & (F.document.file_name.endswith('.yml') | F.document.file_name.endswith('.xml')))
@@ -221,22 +114,35 @@ async def handle_order_list(message: types.Message):
         await message.answer("⚠️ База товаров пуста. Сначала загрузите `price.yml` файл.")
         return
     
-    status_msg = await message.answer("🔄 Парсим список и сверяем с прайсом...")
+    status_msg = await message.answer("🔄 Переводим и сверяем список с прайсом...")
     
     lines = message.text.strip().split('\n')
     
     rows = []
     not_found = []
     
+    # Инициализируем переводчик (с любого языка на украинский)
+    translator = GoogleTranslator(source='auto', target='uk')
+    
     for line in lines:
         line = line.strip()
         if not line:
             continue
         
-        # Вытаскиваем количество и чистое название
+        # Вытаскиваем количество
         quantity = extract_quantity(line)
+        
+        # Очищаем название от цифр/шт
         cleaned_name = clean_product_name(line)
-        cleaned_name_lower = cleaned_name.lower()
+        
+        # Автоматически переводим название на украинский язык
+        try:
+            translated_name = translator.translate(cleaned_name)
+        except Exception as e:
+            logger.error(f"Ошибка перевода строки '{cleaned_name}': {e}")
+            translated_name = cleaned_name  # Если упало, пробуем искать исходный текст
+            
+        cleaned_name_lower = translated_name.lower()
         
         # Поиск в базе (сначала точное совпадение)
         if cleaned_name_lower in price_dict:
@@ -250,13 +156,12 @@ async def handle_order_list(message: types.Message):
                 "Название": item["original_name"],
                 "Цена": price,
                 "Количество": quantity,
-                "Сумма": total_sum
+                "Сумma": total_sum
             })
         else:
-            # Если точное совпадение не найдено, пробуем нечеткий поиск (упрощенный вариант)
+            # Если точное совпадение не найдено, пробуем нечеткий поиск
             found_match = False
             for match_name_lower, item in price_dict.items():
-                # Простая проверка на вхождение подстроки для надежности
                 if cleaned_name_lower in match_name_lower or match_name_lower in cleaned_name_lower:
                     price = item["price"]
                     total_sum = price * quantity
@@ -282,16 +187,14 @@ async def handle_order_list(message: types.Message):
     df = pd.DataFrame(rows)
     output_filename = f"Invoice_{message.from_user.id}.xlsx"
     
-    # ИСПРАВЛЕНО: Генерируем Excel с автоподбором ширины колонок, чтобы текст не слипался
+    # Генерируем Excel с автоподбором ширины колонок
     with pd.ExcelWriter(output_filename, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Invoice')
         worksheet = writer.sheets['Invoice']
         
-        # Перебираем все колонки и устанавливаем ширину по самому длинному тексту в ячейке
         for col in worksheet.columns:
             max_len = max(len(str(cell.value or '')) for cell in col)
             col_letter = col[0].column_letter
-            # Добавляем небольшой запас (+3 символа)
             worksheet.column_dimensions[col_letter].width = max(max_len + 3, 12)
 
     # Формируем отчет в сообщении
@@ -303,7 +206,6 @@ async def handle_order_list(message: types.Message):
     excel_file = FSInputFile(output_filename)
     await message.reply_document(excel_file, caption=report_text, parse_mode="Markdown")
     
-    # Удаляем временный файл с диска сервера
     if os.path.exists(output_filename):
         os.remove(output_filename)
         
