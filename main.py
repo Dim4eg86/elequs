@@ -23,6 +23,17 @@ dp = Dispatcher()
 # Глобальный словарь для хранения прайса в оперативной памяти
 price_dict = {}
 
+# Список базовых цветов для строгой фильтрации совпадений
+COLORS_MAP = {
+    'помаранчевий': ['помаранчевий', 'оранжевый', 'оранжева', 'помаранчева'],
+    'зелений': ['зелений', 'зеленый', 'зелена', 'зеленая'],
+    'червоний': ['червоний', 'красный', 'червона', 'красная'],
+    'синій': ['синій', 'синий', 'синя'],
+    'білий': ['білий', 'белый', 'біла', 'белая'],
+    'чорний': ['чорний', 'черный', 'чорна', 'черная'],
+    'графіт': ['графіт', 'графит'],
+}
+
 def clean_product_name(text):
     """
     Очищает строку от количества в конце (например, ' 5', ' 3 шт', '- 2шт', ' 10шт.').
@@ -134,19 +145,20 @@ async def handle_order_list(message: types.Message):
         
         # Очищаем название от цифр/шт
         cleaned_name = clean_product_name(line)
+        cleaned_name_lower = cleaned_name.lower()
         
         # Автоматически переводим название на украинский язык
         try:
             translated_name = translator.translate(cleaned_name)
         except Exception as e:
             logger.error(f"Ошибка перевода строки '{cleaned_name}': {e}")
-            translated_name = cleaned_name  # Если упало, пробуем искать исходный текст
+            translated_name = cleaned_name
             
-        cleaned_name_lower = translated_name.lower()
+        translated_name_lower = translated_name.lower()
         
         # Поиск в базе (сначала точное совпадение)
-        if cleaned_name_lower in price_dict:
-            item = price_dict[cleaned_name_lower]
+        if translated_name_lower in price_dict:
+            item = price_dict[translated_name_lower]
             price = item["price"]
             total_sum = price * quantity
             
@@ -159,18 +171,32 @@ async def handle_order_list(message: types.Message):
                 "Сумма": total_sum
             })
         else:
-            # ИСПРАВЛЕНО: Умный поиск по ключевым словам, если точное совпадение промахнулось
+            # Умный поиск по ключевым словам с жестким фильтром цветов
             found_match = False
             
-            # Разбиваем запрос на отдельные слова (длиной > 2 символов, убирая предлоги)
-            search_words = [w for w in cleaned_name_lower.split() if len(w) > 2]
+            # Разбиваем перевод на отдельные слова (длиной > 2 символов)
+            search_words = [w for w in translated_name_lower.split() if len(w) > 2]
             
             if search_words:
                 for match_name_lower, item in price_dict.items():
+                    
+                    # ИСПРАВЛЕНО: Строгая проверка на несоответствие цветов
+                    color_mismatch = False
+                    for color_uk, keywords in COLORS_MAP.items():
+                        # Если цвет из карты упомянут в исходном запросе (или переводе)
+                        has_color_in_request = any(kw in cleaned_name_lower or kw in translated_name_lower for kw in keywords)
+                        # Но при этом в текущем товаре из прайса этого цвета НЕТ, а есть другой
+                        if has_color_in_request and color_uk not in match_name_lower:
+                            color_mismatch = True
+                            break
+                    
+                    if color_mismatch:
+                        continue  # Пропускаем этот товар, так как цвет не совпал
+                    
                     # Считаем, сколько слов из запроса содержится в названии из прайса
                     matches_count = sum(1 for word in search_words if word in match_name_lower)
                     
-                    # Считаем необходимый порог совпадений (минимум 70% слов или не меньше 2 для коротких фраз)
+                    # Считаем необходимый порог совпадений (минимум 70% слов или не меньше 2)
                     required_matches = max(2, int(len(search_words) * 0.7))
                     
                     if matches_count >= required_matches:
@@ -185,7 +211,7 @@ async def handle_order_list(message: types.Message):
                             "Сумма": total_sum
                         })
                         found_match = True
-                        break  # Нашли совпадение, выходим из проверки прайса для этой строки
+                        break
             
             if not found_match:
                 not_found.append(line)
