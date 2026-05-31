@@ -58,7 +58,7 @@ def load_price_list(file_path):
             if name_elem is not None and name_elem.text:
                 name_cleaned = name_elem.text.strip().lower()
                 
-                # ИСПРАВЛЕНО: Глубокий поиск цены (.//price) и конвертация
+                # Глубокий поиск цены (.//price) и конвертация
                 price_elem = offer.find(".//price")
                 try:
                     price_val = float(price_elem.text) if price_elem is not None and price_elem.text else 0.0
@@ -156,25 +156,36 @@ async def handle_order_list(message: types.Message):
                 "Название": item["original_name"],
                 "Цена": price,
                 "Количество": quantity,
-                "Сумma": total_sum
+                "Сумма": total_sum
             })
         else:
-            # Если точное совпадение не найдено, пробуем нечеткий поиск
+            # ИСПРАВЛЕНО: Умный поиск по ключевым словам, если точное совпадение промахнулось
             found_match = False
-            for match_name_lower, item in price_dict.items():
-                if cleaned_name_lower in match_name_lower or match_name_lower in cleaned_name_lower:
-                    price = item["price"]
-                    total_sum = price * quantity
-                    rows.append({
-                        "ID товара": item["id"],
-                        "Артикул (SKU)": item["vendorCode"],
-                        "Название": item["original_name"],
-                        "Цена": price,
-                        "Количество": quantity,
-                        "Сумма": total_sum
-                    })
-                    found_match = True
-                    break
+            
+            # Разбиваем запрос на отдельные слова (длиной > 2 символов, убирая предлоги)
+            search_words = [w for w in cleaned_name_lower.split() if len(w) > 2]
+            
+            if search_words:
+                for match_name_lower, item in price_dict.items():
+                    # Считаем, сколько слов из запроса содержится в названии из прайса
+                    matches_count = sum(1 for word in search_words if word in match_name_lower)
+                    
+                    # Считаем необходимый порог совпадений (минимум 70% слов или не меньше 2 для коротких фраз)
+                    required_matches = max(2, int(len(search_words) * 0.7))
+                    
+                    if matches_count >= required_matches:
+                        price = item["price"]
+                        total_sum = price * quantity
+                        rows.append({
+                            "ID товара": item["id"],
+                            "Артикул (SKU)": item["vendorCode"],
+                            "Название": item["original_name"],
+                            "Цена": price,
+                            "Количество": quantity,
+                            "Сумма": total_sum
+                        })
+                        found_match = True
+                        break  # Нашли совпадение, выходим из проверки прайса для этой строки
             
             if not found_match:
                 not_found.append(line)
