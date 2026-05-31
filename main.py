@@ -12,10 +12,10 @@ from deep_translator import GoogleTranslator
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 2. Инициализация бота и диспетчера (СТРОГО НАВЕРХУ)
+# 2. Инициализация бота и диспетчера
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("Переменная окружения BOT_TOKEN не задана!")
+    raise ValueError("Переменная ознакомления BOT_TOKEN не задана!")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -42,7 +42,7 @@ STRICT_TYPES = {
 }
 
 SUB_TYPES = {
-    'компʼютер': ['комп', 'лан', 'lan', 'rj45', 'интернет', 'компьютер'],
+    'компʼютер': ['комп', 'лан', 'lan', 'rj45', 'интернет', 'компьютер', "комп'ютер", "компʼютер"],
     'hdmi': ['hdmi'],
     'tv': ['tv', 'телевиз'],
     'телефон': ['телефон', 'rj11'],
@@ -61,6 +61,10 @@ def extract_quantity(text):
         return int(match.group(1))
     return 1
 
+def normalize_apostrophes(text):
+    """Приводит все виды апострофов к единому стандартному виду для точного поиска."""
+    return text.replace("'", "ʼ").replace("’", "ʼ")
+
 def load_price_list(file_path):
     """Парсит YML файл и загружает товары в глобальный словарь price_dict."""
     global price_dict
@@ -74,7 +78,8 @@ def load_price_list(file_path):
         for offer in offers:
             name_elem = offer.find(".//name")
             if name_elem is not None and name_elem.text:
-                name_cleaned = name_elem.text.strip().lower()
+                # Нормализуем название из прайса сразу при загрузке
+                name_cleaned = normalize_apostrophes(name_elem.text.strip().lower())
                 
                 price_elem = offer.find(".//price")
                 try:
@@ -147,7 +152,7 @@ async def handle_order_list(message: types.Message):
         
         quantity = extract_quantity(line)
         cleaned_name = clean_product_name(line)
-        cleaned_name_lower = cleaned_name.lower()
+        cleaned_name_lower = normalize_apostrophes(cleaned_name.lower())
         
         try:
             translated_name = translator.translate(cleaned_name)
@@ -155,7 +160,7 @@ async def handle_order_list(message: types.Message):
             logger.error(f"Ошибка перевода строки '{cleaned_name}': {e}")
             translated_name = cleaned_name
             
-        translated_name_lower = translated_name.lower()
+        translated_name_lower = normalize_apostrophes(translated_name.lower())
         
         # Шаг 1: Точное совпадение
         if translated_name_lower in price_dict:
@@ -208,7 +213,7 @@ async def handle_order_list(message: types.Message):
                     
                     # Считаем совпадения ключевых слов
                     matches_count = sum(1 for word in search_words if word in match_name_lower)
-                    required_matches = max(2, int(len(search_words) * 0.6))
+                    required_matches = max(2, int(len(search_words) * 0.5))  # Порог 50% для надежности коротких фраз
                     
                     if matches_count >= required_matches:
                         rows.append({
@@ -254,7 +259,7 @@ async def handle_order_list(message: types.Message):
         
     await status_msg.delete()
 
-# 7. Точка входа в приложение
+# 7. Точка входа
 async def main():
     await dp.start_polling(bot)
 
