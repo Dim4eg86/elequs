@@ -23,7 +23,7 @@ dp = Dispatcher()
 # Глобальный словарь для хранения прайса в оперативной памяти
 price_dict = {}
 
-# Список базовых цветов для строгой фильтрации совпадений
+# Карта цветов для строгого сопоставления
 COLORS_MAP = {
     'помаранчевий': ['помаранчевий', 'оранжевый', 'оранжева', 'помаранчева'],
     'зелений': ['зелений', 'зеленый', 'зелена', 'зеленая'],
@@ -34,10 +34,17 @@ COLORS_MAP = {
     'графіт': ['графіт', 'графит'],
 }
 
+# Карта критических типов товаров (если слово есть в запросе, оно ОБЯЗАНО быть в ответе)
+STRICT_TYPES = {
+    'механізм': ['механізм', 'механизм'],
+    'панель': ['панель', 'накладка'],
+    'рамка': ['рамка'],
+    'підсвітка': ['підсвітка', 'подсветка', 'підсвічування']
+}
+
 def clean_product_name(text):
     """
     Очищает строку от количества в конце (например, ' 5', ' 3 шт', '- 2шт', ' 10шт.').
-    При этом полностью сохраняет все украинские буквы, спецсимволы и знаки препинания внутри названия.
     """
     text = re.sub(r'\s*[-\u2013\u2014]*\s*\d+\s*(?:шт|шт\.|pcs)?\s*$', '', text, flags=re.IGNORECASE)
     return text.strip()
@@ -64,12 +71,10 @@ def load_price_list(file_path):
         offers = root.findall(".//offer")
         
         for offer in offers:
-            # Используем .// для сквозного поиска тега внутри offer
             name_elem = offer.find(".//name")
             if name_elem is not None and name_elem.text:
                 name_cleaned = name_elem.text.strip().lower()
                 
-                # Глубокий поиск цены (.//price) и конвертация
                 price_elem = offer.find(".//price")
                 try:
                     price_val = float(price_elem.text) if price_elem is not None and price_elem.text else 0.0
@@ -97,8 +102,8 @@ def load_price_list(file_path):
 async def cmd_start(message: types.Message):
     await message.answer(
         "👋 Привет! Я бот проекта **Elequs**.\n\n"
-        "1. Сначала пришли мне файл `price.yml` (или с любым именем `.yml`), чтобы обновить базу фурнитуры.\n"
-        "2. Затем отправь мне текстовый список заказа от дизайнера (на украинском или русском языке), и я сгенерирую Excel-инвойс для 1С."
+        "1. Сначала пришли мне файл `price.yml`, чтобы обновить базу фурнитуры.\n"
+        "2. Затем отправь мне текстовый список заказа от дизайнера (на украинском или русском), и я сгенерирую Excel-инвойс."
     )
 
 @dp.message(F.document & (F.document.file_name.endswith('.yml') | F.document.file_name.endswith('.xml')))
@@ -117,7 +122,7 @@ async def handle_price_file(message: types.Message):
     if total_count is not None:
         await msg.edit_text(f"✅ Прайс успешно обновлен! Всего товаров в базе: {total_count}")
     else:
-        await msg.edit_text("❌ Произошла ошибка при разборе YML-файла. Проверьте его структуру.")
+        await msg.edit_text("❌ Произошла ошибка при разборе YML-файла.")
 
 @dp.message(F.text & ~F.text.startswith('/'))
 async def handle_order_list(message: types.Message):
@@ -128,11 +133,9 @@ async def handle_order_list(message: types.Message):
     status_msg = await message.answer("🔄 Переводим и сверяем список с прайсом...")
     
     lines = message.text.strip().split('\n')
-    
     rows = []
     not_found = []
     
-    # Инициализируем переводчик (с любого языка на украинский)
     translator = GoogleTranslator(source='auto', target='uk')
     
     for line in lines:
@@ -140,75 +143,69 @@ async def handle_order_list(message: types.Message):
         if not line:
             continue
         
-        # Вытаскиваем количество
         quantity = extract_quantity(line)
-        
-        # Очищаем название от цифр/шт
         cleaned_name = clean_product_name(line)
         cleaned_name_lower = cleaned_name.lower()
         
-        # Автоматически переводим название на украинский язык
         try:
             translated_name = translator.translate(cleaned_name)
         except Exception as e:
-            logger.error(f"Ошибка перевода строки '{cleaned_name}': {e}")
+            logger.error(f"Ошибка перевода: {e}")
             translated_name = cleaned_name
             
         translated_name_lower = translated_name.lower()
         
-        # Поиск в базе (сначала точное совпадение)
+        # 1. Точечный поиск
         if translated_name_lower in price_dict:
             item = price_dict[translated_name_lower]
-            price = item["price"]
-            total_sum = price * quantity
-            
             rows.append({
                 "ID товара": item["id"],
                 "Артикул (SKU)": item["vendorCode"],
                 "Название": item["original_name"],
-                "Цена": price,
+                "Цена": item["price"],
                 "Количество": quantity,
-                "Сумма": total_sum
+                "Сумма": item["price"] * quantity
             })
         else:
-            # Умный поиск по ключевым словам с жестким фильтром цветов
+            # 2. Умный нечеткий поиск с фильтрацией типов и цветов
             found_match = False
-            
-            # Разбиваем перевод на отдельные слова (длиной > 2 символов)
             search_words = [w for w in translated_name_lower.split() if len(w) > 2]
             
             if search_words:
                 for match_name_lower, item in price_dict.items():
                     
-                    # ИСПРАВЛЕНО: Строгая проверка на несоответствие цветов
+                    # Фильтр 1: Проверка на несоответствие критических типов (Механизм vs Панель)
+                    type_mismatch = False
+                    for type_uk, keywords in STRICT_TYPES.items():
+                        has_type_in_req = any(kw in cleaned_name_lower or kw in translated_name_lower for kw in keywords)
+                        if has_type_in_req and type_uk not in match_name_lower:
+                            type_mismatch = True
+                            break
+                    if type_mismatch:
+                        continue
+                    
+                    # Фильтр 2: Проверка на несоответствие цветов
                     color_mismatch = False
                     for color_uk, keywords in COLORS_MAP.items():
-                        # Если цвет из карты упомянут в исходном запросе (или переводе)
-                        has_color_in_request = any(kw in cleaned_name_lower or kw in translated_name_lower for kw in keywords)
-                        # Но при этом в текущем товаре из прайса этого цвета НЕТ, а есть другой
-                        if has_color_in_request and color_uk not in match_name_lower:
+                        has_color_in_req = any(kw in cleaned_name_lower or kw in translated_name_lower for kw in keywords)
+                        if has_color_in_req and color_uk not in match_name_lower:
                             color_mismatch = True
                             break
-                    
                     if color_mismatch:
-                        continue  # Пропускаем этот товар, так как цвет не совпал
+                        continue
                     
-                    # Считаем, сколько слов из запроса содержится в названии из прайса
+                    # Подсчет совпадений слов
                     matches_count = sum(1 for word in search_words if word in match_name_lower)
-                    
-                    # Считаем необходимый порог совпадений (минимум 70% слов или не меньше 2)
-                    required_matches = max(2, int(len(search_words) * 0.7))
+                    required_matches = max(2, int(len(search_words) * 0.6))
                     
                     if matches_count >= required_matches:
-                        price = item["price"]
-                        total_sum = price * quantity
                         rows.append({
                             "ID товара": item["id"],
                             "Артикул (SKU)": item["vendorCode"],
                             "Название": item["original_name"],
-                            "Цена": price,
+                            "Цена": item["price"],
                             "Количество": quantity,
-                            "Сумма": total_sum
+                            "Сумма": item["price"] * quantity
                         })
                         found_match = True
                         break
@@ -217,39 +214,32 @@ async def handle_order_list(message: types.Message):
                 not_found.append(line)
     
     if not rows:
-        await status_msg.edit_text("❌ Ни один товар из списка не был найден в прайсе. Проверьте названия.")
+        await status_msg.edit_text("❌ Ни один товар из списка не был найден в прайсе.")
         return
 
-    # Создаем DataFrame
     df = pd.DataFrame(rows)
     output_filename = f"Invoice_{message.from_user.id}.xlsx"
     
-    # Генерируем Excel с автоподбором ширины колонок
     with pd.ExcelWriter(output_filename, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Invoice')
         worksheet = writer.sheets['Invoice']
-        
         for col in worksheet.columns:
             max_len = max(len(str(cell.value or '')) for cell in col)
             col_letter = col[0].column_letter
             worksheet.column_dimensions[col_letter].width = max(max_len + 3, 12)
 
-    # Формируем отчет в сообщении
     report_text = f"📊 **Инвойс успешно сформирован!**\n\n✅ Найдено позиций: {len(rows)}"
     if not_found:
-        report_text += "\n\n⚠️ **Не удалось найти в прайсе:**\n" + "\n".join([f"• {item}" for item in not_found])
+        report_text += "\n\n⚠️ **Не удалось найти:**\n" + "\n".join([f"• {item}" for item in not_found])
     
-    # Отправляем файл пользователю
     excel_file = FSInputFile(output_filename)
     await message.reply_document(excel_file, caption=report_text, parse_mode="Markdown")
     
     if os.path.exists(output_filename):
         os.remove(output_filename)
-        
     await status_msg.delete()
 
 async def main():
-    # Запуск бота в режиме Polling
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
