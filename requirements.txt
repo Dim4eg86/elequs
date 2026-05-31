@@ -3,3 +3,4 @@ lxml==5.3.0
 pandas>=2.2.3
 openpyxl==3.1.5
 levenshtein==0.25.1
+deep-translator
