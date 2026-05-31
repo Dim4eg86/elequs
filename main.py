@@ -34,7 +34,7 @@ COLORS_MAP = {
     'графіт': ['графіт', 'графит'],
 }
 
-# Карта критических типов товаров (если слово есть в запросе, оно ОБЯЗАНО быть в ответе)
+# Критические типы товаров
 STRICT_TYPES = {
     'механізм': ['механізм', 'механизм'],
     'панель': ['панель', 'накладка'],
@@ -42,16 +42,24 @@ STRICT_TYPES = {
     'підсвітка': ['підсвітка', 'подсветка', 'підсвічування']
 }
 
+# Подтипы розеток/разъемов (если один из них есть в запросе, он ОБЯЗАН быть в прайсе)
+SUB_TYPES = {
+    'компʼютер': ['комп', 'лан', 'lan', 'rj45', 'интернет'],
+    'hdmi': ['hdmi'],
+    'tv': ['tv', 'телевиз'],
+    'телефон': ['телефон', 'rj11'],
+}
+
 def clean_product_name(text):
     """
-    Очищает строку от количества в конце (например, ' 5', ' 3 шт', '- 2шт', ' 10шт.').
+    Очищает строку от количества в конце.
     """
     text = re.sub(r'\s*[-\u2013\u2014]*\s*\d+\s*(?:шт|шт\.|pcs)?\s*$', '', text, flags=re.IGNORECASE)
     return text.strip()
 
 def extract_quantity(text):
     """
-    Извлекает числовое значение количества из конца строки. Если не найдено, возвращает 1.
+    Извлекает числовое значение количества из конца строки.
     """
     match = re.search(r'(\d+)\s*(?:шт|шт\.|pcs)?\s*$', text, flags=re.IGNORECASE)
     if match:
@@ -155,7 +163,7 @@ async def handle_order_list(message: types.Message):
             
         translated_name_lower = translated_name.lower()
         
-        # 1. Точечный поиск
+        # 1. Поиск точного совпадения
         if translated_name_lower in price_dict:
             item = price_dict[translated_name_lower]
             rows.append({
@@ -167,14 +175,14 @@ async def handle_order_list(message: types.Message):
                 "Сумма": item["price"] * quantity
             })
         else:
-            # 2. Умный нечеткий поиск с фильтрацией типов и цветов
+            # 2. Умный нечеткий поиск с фильтрами категорий, подтипов и цветов
             found_match = False
             search_words = [w for w in translated_name_lower.split() if len(w) > 2]
             
             if search_words:
                 for match_name_lower, item in price_dict.items():
                     
-                    # Фильтр 1: Проверка на несоответствие критических типов (Механизм vs Панель)
+                    # Фильтр 1: Проверка базовых типов (Механизм vs Панель)
                     type_mismatch = False
                     for type_uk, keywords in STRICT_TYPES.items():
                         has_type_in_req = any(kw in cleaned_name_lower or kw in translated_name_lower for kw in keywords)
@@ -184,7 +192,17 @@ async def handle_order_list(message: types.Message):
                     if type_mismatch:
                         continue
                     
-                    # Фильтр 2: Проверка на несоответствие цветов
+                    # Фильтр 2: Проверка подтипов (Компьютерная vs HDMI vs TV)
+                    sub_type_mismatch = False
+                    for sub_uk, keywords in SUB_TYPES.items():
+                        has_sub_in_req = any(kw in cleaned_name_lower or kw in translated_name_lower for kw in keywords)
+                        if has_sub_in_req and sub_uk not in match_name_lower:
+                            sub_type_mismatch = True
+                            break
+                    if sub_type_mismatch:
+                        continue
+                    
+                    # Фильтр 3: Проверка цветов
                     color_mismatch = False
                     for color_uk, keywords in COLORS_MAP.items():
                         has_color_in_req = any(kw in cleaned_name_lower or kw in translated_name_lower for kw in keywords)
